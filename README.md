@@ -1,94 +1,31 @@
 ETL Test – Castor (SSIS + SQL Server)
-1) Fuentes
+1) Arquitectura general
 
-data/sales.csv → fuente estructurada con ventas (fecha, cliente, producto, cantidad, precio, descuento, costo, canal)
+El proyecto se implementó en SQL Server Integration Services (SSIS) y SQL Server 2019, bajo una arquitectura de tres niveles:
 
-data/customers.json → fuente semi-estructurada con clientes (contacto, ubicación, lealtad)
+Staging: recepción, validación y limpieza de datos.
 
-2) Base de datos y esquemas
+DW (Data Warehouse): integración y carga de dimensiones y hechos.
 
-Base: CastorDW
+Orquestador: control del flujo total de ejecución (de STG a DW).
+
+2) Fuentes de datos
+
+sales.csv → archivo estructurado con las ventas (order_id, fecha, cliente, producto, precio, cantidad, etc.)
+
+customers.json → archivo semi-estructurado con la información de clientes (contacto, ubicación, programa de lealtad).
+
+3) Base de datos
+
+Nombre: CastorDW
 
 Esquemas:
 
-stg → staging (datos intermedios y control de errores)
+stg → staging temporal y control de errores.
 
-dw → modelo dimensional (datos finales para análisis)
+dw → modelo dimensional final.
 
-3) Scripts (SQL Server)
-Orden	Archivo	Descripción
-1	00_create_db.sql	Crea la base de datos CastorDW
-2	01_create_schemas.sql	Crea los esquemas stg y dw
-3	02_create_tables.sql	Crea tablas stg.Sales, stg.Customers, stg.Sales_Errors, stg.AuditLog, stg.JsonRaw y el modelo dimensional dw.DimDate, dw.DimCustomer, dw.DimProduct, dw.FactSales
-4	03_populate_dimdate.sql	Pobla la tabla dw.DimDate con fechas 2024–2026
-5	load_json_raw.sql (nuevo)	Inserta el contenido de customers.json directamente a stg.JsonRaw usando OPENROWSET
-6	05_openjson_to_stg_customers.sql	Aplana el JSON desde stg.JsonRaw hacia stg.Customers usando OPENJSON
-7	04_load_from_stg.sql	Carga DimCustomer, DimProduct y FactSales (con control de duplicados)
-4) Reglas de transformación
-
-Fechas en formato ISO (YYYY-MM-DD)
-
-Duplicados: eliminados por (order_id, product_code)
-
-Campos obligatorios: order_id, customer_id, order_date
-
-Filas con datos faltantes se registran en stg.Sales_Errors
-
-Descuentos nulos (discount_rate) → 0
-
-Columnas calculadas PERSISTED en dw.FactSales:
-GrossAmount, DiscountAmt, NetAmount, TotalCost, Margin
-
-Control de duplicados en FactSales mediante NOT EXISTS o MERGE
-(puedes incluir un índice único si lo deseas)
-
-5) SSIS (resumen de proceso)
-Control Flow
-
-DF_Load_Sales_CSV → carga stg.Sales desde sales.csv
-
-Flat File Source → Derived Column → Conditional Split
-
-Carga filas válidas → stg.Sales
-
-Registra errores → stg.Sales_Errors
-
-Execute SQL – Load_JSON_Raw → lee customers.json desde SQL con OPENROWSET e inserta en stg.JsonRaw
-
-Execute SQL – OPENJSON_to_stg_Customers → aplana JSON a stg.Customers
-
-Execute SQL – Load_Dims_and_Fact → inserta datos en dw con control de duplicados
-
-Execute SQL – Validations_KPIs → valida conteos y muestra KPIs básicos
-
-6) Validaciones
--- Conteos
-SELECT COUNT(*) AS StgSales FROM stg.Sales;
-SELECT COUNT(*) AS StgCustomers FROM stg.Customers;
-SELECT COUNT(*) AS FactRows FROM dw.FactSales;
-
--- KPIs
-SELECT dd.Year, dd.Month, SUM(NetAmount) AS Revenue, SUM(Margin) AS Margin
-FROM dw.FactSales fs
-JOIN dw.DimDate dd ON fs.DateKey = dd.DateKey
-GROUP BY dd.Year, dd.Month
-ORDER BY dd.Year, dd.Month;
-
-7) Requisitos SQL
-
-SQL Server 2016+ (compatibilidad nivel 130 o superior)
-
-Permitir consultas ad-hoc:
-
-EXEC sp_configure 'show advanced options', 1; RECONFIGURE;
-EXEC sp_configure 'Ad Hoc Distributed Queries', 1; RECONFIGURE;
-
-
-La ruta del JSON debe ser accesible por el servicio de SQL Server, por ejemplo:
-
-C:\Castor_ETL_Test\data\customers.json
-
-8) Estructura del proyecto
+4) Estructura de carpetas del proyecto
 Castor_ETL_Test/
 │
 ├── data/
@@ -100,13 +37,14 @@ Castor_ETL_Test/
 │   ├── 01_create_schemas.sql
 │   ├── 02_create_tables.sql
 │   ├── 03_populate_dimdate.sql
-│   ├── 04_load_from_stg.sql
-│   ├── 05_openjson_to_stg_customers.sql
-│   └── load_json_raw.sql
+│   ├── 04_stored_procedures.sql
+│   └── 05_validations.sql
 │
 ├── ssis_project/
-│   ├── Main.dtsx
-│   └── Castor.PruebaETL.sln
+│   ├── Cargar_STG.dtsx
+│   ├── Cargar_DW.dtsx
+│   ├── Orquestador.dtsx
+│   └── Castor.sln
 │
 ├── docs/
 │   ├── ETL_Flow_Castor.png
@@ -114,4 +52,145 @@ Castor_ETL_Test/
 │
 └── README.md
 
+5) Procesos implementados
+Paquete 1 – Cargar_STG.dtsx
 
+Encargado de la extracción y preparación de datos en el entorno staging.
+
+Flujo principal
+
+Carga de datos SalesCsv (Data Flow)
+
+Fuente: Flat File Source (sales.csv).
+
+Transformaciones: Derived Column, Data Conversion, Conditional Split, error handling.
+
+Destinos:
+
+stg.Sales → registros válidos.
+
+stg.Sales_Errors → registros rechazados o con campos obligatorios nulos.
+
+Contenedor “Carga datos JSON” (Sequence Container)
+
+Tarea 1: exec cargaJsonRaw
+
+Ejecuta el SP dbo.cargaJsonRaw que lee el archivo customers.json directamente desde SQL Server usando OPENROWSET y lo inserta en stg.JsonRaw.
+
+La ruta se pasa como parámetro @Path desde SSIS.
+
+Tarea 2: TRUNCATE TABLE stg.Customers (o EXEC stg.truncate_Customers).
+
+Tarea 3: exec stg.openjson_to_Customers
+
+Ejecuta el SP que usa OPENJSON para aplanar el contenido del JSON hacia stg.Customers.
+
+Paquete 2 – Cargar_DW.dtsx
+
+Encargado de poblar las tablas del modelo dimensional con lógica incremental.
+
+Flujo principal
+
+exec cargar_DimCustomer
+
+Hace MERGE entre stg.Customers y dw.DimCustomer.
+
+exec cargar_DimProduct
+
+Carga incremental en dw.DimProduct.
+
+exec cargar_FactSales
+
+Inserta nuevos registros en dw.FactSales, evitando duplicados mediante NOT EXISTS.
+
+Paquete 3 – Orquestador.dtsx
+
+Controla el flujo global del proceso.
+
+Flujo principal
+
+Ejecutar STG → llama al paquete Cargar_STG.dtsx
+
+Ejecutar DW → llama al paquete Cargar_DW.dtsx
+Ambas tareas se enlazan por precedencia On Success.
+
+6) Procedimientos almacenados
+Procedimiento	Descripción
+dbo.cargaJsonRaw	Carga el archivo JSON a stg.JsonRaw usando OPENROWSET.
+stg.truncate_Customers	Limpia la tabla staging de clientes.
+stg.openjson_to_Customers	Aplana los datos del JSON y los inserta en stg.Customers.
+dbo.cargar_DimCustomer	MERGE incremental en la dimensión de clientes.
+dbo.cargar_DimProduct	MERGE incremental en la dimensión de productos.
+dbo.cargar_FactSales	Inserta nuevas transacciones en el hecho FactSales evitando duplicados.
+7) Reglas de negocio y transformaciones
+
+Filas con order_id, customer_id o order_date nulos → rechazadas a stg.Sales_Errors.
+
+Descuentos nulos (discount_rate) → reemplazados por 0.
+
+Duplicados (order_id + product_code) → eliminados antes de la carga.
+
+Medidas calculadas persistidas (PERSISTED) en dw.FactSales:
+
+GrossAmount = Quantity * UnitPrice
+
+DiscountAmt = GrossAmount * DiscountRate
+
+NetAmount = GrossAmount - DiscountAmt
+
+TotalCost = Quantity * UnitCost
+
+Margin = NetAmount - TotalCost
+
+8) Control de duplicados
+
+En el proceso cargar_FactSales se evita insertar registros ya existentes mediante NOT EXISTS.
+
+Además, se sugiere crear un índice único para reforzar la integridad:
+
+CREATE UNIQUE INDEX UX_FactSales_BK
+ON dw.FactSales(DateKey, CustomerKey, ProductKey, Channel, Quantity, UnitPrice, DiscountRate, UnitCost);
+
+9) Validaciones finales
+-- Conteos por etapa
+SELECT COUNT(*) AS StgSales FROM stg.Sales;
+SELECT COUNT(*) AS StgCustomers FROM stg.Customers;
+SELECT COUNT(*) AS FactRows FROM dw.FactSales;
+
+-- KPIs finales
+SELECT dd.Year, dd.Month, SUM(NetAmount) AS Revenue, SUM(Margin) AS Margin
+FROM dw.FactSales fs
+JOIN dw.DimDate dd ON fs.DateKey = dd.DateKey
+GROUP BY dd.Year, dd.Month
+ORDER BY dd.Year, dd.Month;
+
+10) Ejecución del proyecto
+
+Abre Orquestador.dtsx en SSIS.
+
+Configura los parámetros de conexión y el @Path del JSON.
+
+Ejecuta el paquete completo.
+
+Verifica logs, conteos y KPIs finales.
+
+11) Requisitos técnicos
+
+SQL Server 2016+ con Ad Hoc Distributed Queries habilitado.
+
+Permisos de lectura sobre la ruta del archivo JSON para el servicio SQL Server.
+
+Nivel de compatibilidad ≥ 130.
+
+12) Video de entrega
+
+ Duración máxima: 10 minutos
+Debe mostrar:
+
+Tu rostro y pantalla completa.
+
+Explicación del flujo completo (STG → DW → Orquestador).
+
+Justificación técnica de cada componente (transformaciones, SPs, control de errores).
+
+Evidencia de la carga correcta y consultas de validación.
