@@ -37,8 +37,12 @@ Castor_ETL_Test/
 │   ├── 01_create_schemas.sql
 │   ├── 02_create_tables.sql
 │   ├── 03_populate_dimdate.sql
-│   ├── 04_stored_procedures.sql
-│   └── 05_validations.sql
+│   ├── 04_load_from_stg.sql
+│   ├── 05_2_openjson_to_stg_customers.sql
+│   ├── CastorDW.bak
+│   ├── Script_CastorDW.sql
+│   └── ScriptTask_LoadJson.cs
+
 │
 ├── ssis_project/
 │   ├── Cargar_STG.dtsx
@@ -47,12 +51,12 @@ Castor_ETL_Test/
 │   └── Castor.sln
 │
 ├── docs/
-│   ├── ETL_Flow_Castor.png
+│   ├── diagrama CastorDW.png
 │   └── Model_ER_Castor.png
 │
 └── README.md
 
-5) Procesos implementados
+6) Procesos implementados
 Paquete 1 – Cargar_STG.dtsx
 
 Encargado de la extracción y preparación de datos en el entorno staging.
